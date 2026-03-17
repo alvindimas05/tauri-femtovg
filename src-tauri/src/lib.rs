@@ -1,17 +1,26 @@
-use std::sync::Mutex;
+use std::sync::mpsc;
 
-use tauri::{async_runtime::block_on, AppHandle, Manager, RunEvent, WindowEvent};
+use tauri::{async_runtime::block_on, AppHandle, Manager, RunEvent, WebviewWindow, WindowEvent};
 
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
 fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
 }
 
+enum RenderMsg {
+    Resize { width: u32, height: u32 },
+    Paint,
+    Exit,
+}
+
+struct RenderState {
+    tx: mpsc::SyncSender<RenderMsg>,
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .setup(init_wgpu)
+        .setup(init_renderer)
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![greet])
         .build(tauri::generate_context!())
@@ -26,66 +35,35 @@ fn handle_run(app_handle: &AppHandle, event: RunEvent) {
             event: WindowEvent::Resized(size),
             ..
         } => {
-            let config = app_handle.state::<Mutex<wgpu::SurfaceConfiguration>>();
-            let surface = app_handle.state::<wgpu::Surface>();
-            let device = app_handle.state::<wgpu::Device>();
-
-            let mut config = config.lock().unwrap();
-            config.width = if size.width > 0 { size.width } else { 1 };
-            config.height = if size.height > 0 { size.height } else { 1 };
-            surface.configure(&device, &config)
+            let state = app_handle.state::<RenderState>();
+            let _ = state.tx.send(RenderMsg::Resize {
+                width: if size.width > 0 { size.width } else { 1 },
+                height: if size.height > 0 { size.height } else { 1 },
+            });
         }
+
         RunEvent::MainEventsCleared => {
-            let surface = app_handle.state::<wgpu::Surface>();
-            let render_pipeline = app_handle.state::<wgpu::RenderPipeline>();
-            let device = app_handle.state::<wgpu::Device>();
-            let queue = app_handle.state::<wgpu::Queue>();
-
-            let frame = surface
-                .get_current_texture()
-                .expect("Failed to acquire next swap chain texture");
-            let view = frame
-                .texture
-                .create_view(&wgpu::TextureViewDescriptor::default());
-            let mut encoder =
-                device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-            {
-                let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: None,
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                            store: wgpu::StoreOp::Store,
-                        },
-                        depth_slice: None,
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                });
-                rpass.set_pipeline(&render_pipeline);
-                rpass.draw(0..3, 0..1);
-            }
-
-            queue.submit(Some(encoder.finish()));
-            frame.present();
+            let state = app_handle.state::<RenderState>();
+            let _ = state.tx.send(RenderMsg::Paint);
         }
-        _ => (),
+
+        RunEvent::ExitRequested { .. } | RunEvent::Exit => {
+            if let Some(state) = app_handle.try_state::<RenderState>() {
+                let _ = state.tx.send(RenderMsg::Exit);
+            }
+        }
+
+        _ => {}
     }
 }
 
-fn init_wgpu(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    let window = app.get_webview_window("main").unwrap();
-    let size = window
-        .inner_size()
-        .expect("Failed to get window inner size");
+fn init_renderer(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    let window: WebviewWindow = app.get_webview_window("main").unwrap();
+    let size = window.inner_size().expect("Failed to get window inner size");
 
     let instance = wgpu::Instance::default();
-
     let surface = instance.create_surface(window).unwrap();
+
     let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::default(),
         force_fallback_adapter: false,
@@ -103,57 +81,10 @@ fn init_wgpu(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     }))
     .expect("Failed to create device");
 
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: None,
-        source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(
-            r#"
-@vertex
-fn vs_main(@builtin(vertex_index) in_vertex_index: u32) -> @builtin(position) vec4<f32> {
-    let x = f32(i32(in_vertex_index) - 1);
-    let y = f32(i32(in_vertex_index & 1u) * 2 - 1);
-    return vec4<f32>(x, y, 0.0, 1.0);
-}
-
-@fragment
-fn fs_main() -> @location(0) vec4<f32> {
-    return vec4<f32>(1.0, 0.0, 0.0, 1.0);
-}
-"#,
-        )),
-    });
-
-    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: None,
-        bind_group_layouts: &[],
-        immediate_size: 0,
-    });
-
     let swapchain_capabilities = surface.get_capabilities(&adapter);
     let swapchain_format = swapchain_capabilities.formats[0];
 
-    let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: None,
-        layout: Some(&pipeline_layout),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: Some("vs_main"),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-            buffers: &[],
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: Some("fs_main"),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-            targets: &[Some(swapchain_format.into())],
-        }),
-        primitive: wgpu::PrimitiveState::default(),
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
-        multiview_mask: None,
-        cache: None,
-    });
-
-    let config = wgpu::SurfaceConfiguration {
+    let mut config = wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         format: swapchain_format,
         width: size.width,
@@ -166,11 +97,65 @@ fn fs_main() -> @location(0) vec4<f32> {
 
     surface.configure(&device, &config);
 
-    app.manage(surface);
-    app.manage(render_pipeline);
-    app.manage(device);
-    app.manage(queue);
-    app.manage(Mutex::new(config));
+    let (tx, rx) = mpsc::sync_channel::<RenderMsg>(64);
 
+    let thread_device = device.clone();
+    let thread_queue = queue.clone();
+    std::thread::spawn(move || {
+        let renderer = femtovg::renderer::WGPURenderer::new(thread_device.clone(), thread_queue.clone());
+        let mut canvas = femtovg::Canvas::new(renderer).expect("Cannot create femtovg canvas");
+        canvas.set_size(size.width, size.height, 1.0);
+
+        for msg in rx {
+            match msg {
+                RenderMsg::Resize { width, height } => {
+                    config.width = width;
+                    config.height = height;
+                    surface.configure(&thread_device, &config);
+                    canvas.set_size(width, height, 1.0);
+                }
+
+                RenderMsg::Paint => {
+                    let frame = match surface.get_current_texture() {
+                        Ok(f) => f,
+                        Err(_) => continue,
+                    };
+                    let cmd_buffer = draw_triangle(&mut canvas, &frame);
+                    thread_queue.submit(std::iter::once(cmd_buffer));
+                    frame.present();
+                }
+
+                RenderMsg::Exit => break,
+            }
+        }
+    });
+
+    app.manage(RenderState { tx });
     Ok(())
+}
+
+fn draw_triangle<R: femtovg::Renderer<Surface = wgpu::Texture, CommandBuffer = wgpu::CommandBuffer>>(
+    canvas: &mut femtovg::Canvas<R>,
+    frame: &wgpu::SurfaceTexture,
+) -> wgpu::CommandBuffer {
+    let w = canvas.width() as f32;
+    let h = canvas.height() as f32;
+
+    canvas.clear_rect(0, 0, canvas.width(), canvas.height(), femtovg::Color::black());
+
+    let cx = w / 2.0;
+    let top = (h * 0.15, cx);
+    let bl  = (h * 0.85, cx - w * 0.35);
+    let br  = (h * 0.85, cx + w * 0.35);
+
+    let mut path = femtovg::Path::new();
+    path.move_to(top.1, top.0);
+    path.line_to(br.1,  br.0);
+    path.line_to(bl.1,  bl.0);
+    path.close();
+
+    let paint = femtovg::Paint::color(femtovg::Color::rgb(220, 30, 30));
+    canvas.fill_path(&path, &paint);
+
+    canvas.flush_to_surface(&frame.texture)
 }
