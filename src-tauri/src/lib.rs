@@ -84,13 +84,21 @@ fn init_renderer(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>>
     let swapchain_capabilities = surface.get_capabilities(&adapter);
     let swapchain_format = swapchain_capabilities.formats[0];
 
+    let alpha_mode = if swapchain_capabilities.alpha_modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
+        wgpu::CompositeAlphaMode::PreMultiplied
+    } else if swapchain_capabilities.alpha_modes.contains(&wgpu::CompositeAlphaMode::PostMultiplied) {
+        wgpu::CompositeAlphaMode::PostMultiplied
+    } else {
+        swapchain_capabilities.alpha_modes[0]
+    };
+
     let mut config = wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         format: swapchain_format,
         width: size.width,
         height: size.height,
         present_mode: wgpu::PresentMode::Fifo,
-        alpha_mode: swapchain_capabilities.alpha_modes[0],
+        alpha_mode,
         view_formats: vec![],
         desired_maximum_frame_latency: 2,
     };
@@ -141,7 +149,8 @@ fn draw_triangle<R: femtovg::Renderer<Surface = wgpu::Texture, CommandBuffer = w
     let w = canvas.width() as f32;
     let h = canvas.height() as f32;
 
-    canvas.clear_rect(0, 0, canvas.width(), canvas.height(), femtovg::Color::black());
+    let bg_color = femtovg::Color::rgba(0, 0, 0, 0);
+    canvas.clear_rect(0, 0, canvas.width(), canvas.height(), bg_color);
 
     let cx = w / 2.0;
     let top = (h * 0.15, cx);
