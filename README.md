@@ -1,7 +1,5 @@
-# Tauri + Vanilla TS
+# Tauri Femtovg
 
-This template should help get you started developing with Tauri in vanilla HTML, CSS and Typescript.
+Tauri implementation with femtovg for GPU accelerated 2D graphics rendering. This might be a good alternative to draw things natively besides wgpu since it conflicts with GTK on Linux.
 
-## Recommended IDE Setup
-
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+It uses wgpu for other platforms and OpenGL for Linux.
