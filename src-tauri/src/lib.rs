@@ -1,6 +1,5 @@
 use std::sync::mpsc;
-
-use tauri::{async_runtime::block_on, AppHandle, Manager, RunEvent, WebviewWindow, WindowEvent};
+use tauri::{AppHandle, Manager, RunEvent, WebviewWindow, WindowEvent};
 
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -13,8 +12,14 @@ enum RenderMsg {
     Exit,
 }
 
+#[cfg(not(target_os = "linux"))]
 struct RenderState {
     tx: mpsc::SyncSender<RenderMsg>,
+}
+
+#[cfg(target_os = "linux")]
+struct RenderState {
+    tx: gtk::glib::Sender<RenderMsg>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -35,16 +40,18 @@ fn handle_run(app_handle: &AppHandle, event: RunEvent) {
             event: WindowEvent::Resized(size),
             ..
         } => {
-            let state = app_handle.state::<RenderState>();
-            let _ = state.tx.send(RenderMsg::Resize {
-                width: if size.width > 0 { size.width } else { 1 },
-                height: if size.height > 0 { size.height } else { 1 },
-            });
+            if let Some(state) = app_handle.try_state::<RenderState>() {
+                let _ = state.tx.send(RenderMsg::Resize {
+                    width: if size.width > 0 { size.width } else { 1 },
+                    height: if size.height > 0 { size.height } else { 1 },
+                });
+            }
         }
 
         RunEvent::MainEventsCleared => {
-            let state = app_handle.state::<RenderState>();
-            let _ = state.tx.send(RenderMsg::Paint);
+            if let Some(state) = app_handle.try_state::<RenderState>() {
+                let _ = state.tx.send(RenderMsg::Paint);
+            }
         }
 
         RunEvent::ExitRequested { .. } | RunEvent::Exit => {
@@ -57,7 +64,147 @@ fn handle_run(app_handle: &AppHandle, event: RunEvent) {
     }
 }
 
+// Reusable drawing logic
+fn draw_triangle<R: femtovg::Renderer>(canvas: &mut femtovg::Canvas<R>) {
+    let w = canvas.width() as f32;
+    let h = canvas.height() as f32;
+
+    let bg_color = femtovg::Color::rgba(0, 0, 0, 0);
+    canvas.clear_rect(0, 0, canvas.width(), canvas.height(), bg_color);
+
+    let cx = w / 2.0;
+    let top = (h * 0.15, cx);
+    let bl  = (h * 0.85, cx - w * 0.35);
+    let br  = (h * 0.85, cx + w * 0.35);
+
+    let mut path = femtovg::Path::new();
+    path.move_to(top.1, top.0);
+    path.line_to(br.1,  br.0);
+    path.line_to(bl.1,  bl.0);
+    path.close();
+
+    let paint = femtovg::Paint::color(femtovg::Color::rgb(220, 30, 30));
+    canvas.fill_path(&path, &paint);
+}
+
+// Linux / GTK initialization
+#[cfg(target_os = "linux")]
 fn init_renderer(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    use tauri::WindowExtUnix;
+    use gtk::prelude::*;
+    use std::rc::Rc;
+    use std::cell::RefCell;
+
+    let window: WebviewWindow = app.get_webview_window("main").unwrap();
+    
+    // Get GTK window and its default vbox
+    let gtk_window = window.gtk_window().unwrap();
+    let vbox = window.default_vbox().unwrap();
+
+    // The Webview is already packed inside vbox by Tauri. 
+    // We can extract its children, reparent it into a GTK overlay alongside GLArea.
+    let children = vbox.children();
+    // Assuming the first child is the webview container
+    let webview_widget = children.first().unwrap().clone();
+    vbox.remove(&webview_widget);
+
+    let overlay = gtk::Overlay::new();
+    let gl_area = gtk::GLArea::new();
+    gl_area.set_has_alpha(true);
+    gl_area.set_auto_render(true);
+
+    let canvas_state: Rc<RefCell<Option<femtovg::Canvas<femtovg::renderer::OpenGl>>>> = Rc::new(RefCell::new(None));
+    let canvas_state_realize = canvas_state.clone();
+    let canvas_state_render = canvas_state.clone();
+
+    gl_area.connect_realize(move |gl_area| {
+        gl_area.make_current();
+        if gl_area.error().is_some() { return; }
+
+        let renderer = unsafe {
+            femtovg::renderer::OpenGl::new_from_function(|s| {
+                let mut ptr = std::ptr::null();
+                let name = std::ffi::CString::new(s).unwrap();
+                if let Ok(lib) = libloading::Library::new("libGL.so.1") {
+                    if let Ok(sym) = lib.get::<unsafe extern "C" fn(*const i8) -> *const std::ffi::c_void>(b"glXGetProcAddress\0") {
+                        ptr = sym(name.as_ptr());
+                    }
+                }
+                if ptr.is_null() {
+                    if let Ok(lib) = libloading::Library::new("libEGL.so.1") {
+                        if let Ok(sym) = lib.get::<unsafe extern "C" fn(*const i8) -> *const std::ffi::c_void>(b"eglGetProcAddress\0") {
+                            ptr = sym(name.as_ptr());
+                        }
+                    }
+                }
+                ptr
+            })
+        }.expect("Cannot create femtovg OpenGL renderer");
+
+        let mut canvas = femtovg::Canvas::new(renderer).expect("Cannot create femtovg canvas");
+        
+        let alloc = gl_area.allocation();
+        canvas.set_size(alloc.width() as u32, alloc.height() as u32, 1.0);
+        
+        *canvas_state_realize.borrow_mut() = Some(canvas);
+    });
+
+    gl_area.connect_render(move |_gl_area, _gl_context| {
+        if let Some(canvas) = canvas_state_render.borrow_mut().as_mut() {
+            draw_triangle(canvas);
+            canvas.flush();
+        }
+        gtk::glib::Propagation::Proceed
+    });
+
+    gl_area.connect_resize(move |_gl_area, width, height| {
+        if let Some(canvas) = canvas_state.borrow_mut().as_mut() {
+            canvas.set_size(width as u32, height as u32, 1.0);
+        }
+    });
+
+    overlay.add(&gl_area);
+
+    // Put webview on top of GLArea
+    let fixed = gtk::Fixed::new();
+    fixed.put(&webview_widget, 0, 0);
+    // Bind webview size to GLArea size
+    gl_area.connect_size_allocate(gtk::glib::clone!(@weak webview_widget => move |_, alloc| {
+        webview_widget.set_size_request(alloc.width(), alloc.height());
+    }));
+
+    overlay.add_overlay(&fixed);
+    vbox.pack_start(&overlay, true, true, 0);
+    overlay.show_all();
+
+    let (tx, rx) = gtk::glib::MainContext::channel(gtk::glib::PRIORITY_DEFAULT);
+    
+    let gl_area_clone = gl_area.clone();
+    rx.attach(None, move |msg| {
+        match msg {
+            RenderMsg::Resize { .. } => {
+                // Resize handled by GTK layout
+            }
+            RenderMsg::Paint => {
+                gl_area_clone.queue_render();
+            }
+            RenderMsg::Exit => return gtk::glib::ControlFlow::Break,
+        }
+        gtk::glib::ControlFlow::Continue
+    });
+
+    app.manage(RenderState { tx });
+    Ok(())
+}
+
+// -----------------------------------------------------------------------------
+// NON-LINUX / WGPU INITIALIZATION
+// -----------------------------------------------------------------------------
+
+#[cfg(not(target_os = "linux"))]
+fn init_renderer(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    use tauri::async_runtime::block_on;
+
     let window: WebviewWindow = app.get_webview_window("main").unwrap();
     let size = window.inner_size().expect("Failed to get window inner size");
 
@@ -128,7 +275,8 @@ fn init_renderer(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>>
                         Ok(f) => f,
                         Err(_) => continue,
                     };
-                    let cmd_buffer = draw_triangle(&mut canvas, &frame);
+                    draw_triangle(&mut canvas);
+                    let cmd_buffer = canvas.flush_to_surface(&frame.texture);
                     thread_queue.submit(std::iter::once(cmd_buffer));
                     frame.present();
                 }
@@ -140,31 +288,4 @@ fn init_renderer(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>>
 
     app.manage(RenderState { tx });
     Ok(())
-}
-
-fn draw_triangle<R: femtovg::Renderer<Surface = wgpu::Texture, CommandBuffer = wgpu::CommandBuffer>>(
-    canvas: &mut femtovg::Canvas<R>,
-    frame: &wgpu::SurfaceTexture,
-) -> wgpu::CommandBuffer {
-    let w = canvas.width() as f32;
-    let h = canvas.height() as f32;
-
-    let bg_color = femtovg::Color::rgba(0, 0, 0, 0);
-    canvas.clear_rect(0, 0, canvas.width(), canvas.height(), bg_color);
-
-    let cx = w / 2.0;
-    let top = (h * 0.15, cx);
-    let bl  = (h * 0.85, cx - w * 0.35);
-    let br  = (h * 0.85, cx + w * 0.35);
-
-    let mut path = femtovg::Path::new();
-    path.move_to(top.1, top.0);
-    path.line_to(br.1,  br.0);
-    path.line_to(bl.1,  bl.0);
-    path.close();
-
-    let paint = femtovg::Paint::color(femtovg::Color::rgb(220, 30, 30));
-    canvas.fill_path(&path, &paint);
-
-    canvas.flush_to_surface(&frame.texture)
 }

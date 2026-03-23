@@ -4076,6 +4076,8 @@ name = "tauri-femtovg"
 version = "0.1.0"
 dependencies = [
  "femtovg",
+ "gtk",
+ "libloading 0.8.9",
  "serde",
  "serde_json",
  "tauri",
