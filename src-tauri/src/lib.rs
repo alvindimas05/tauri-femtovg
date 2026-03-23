@@ -10,9 +10,14 @@ enum RenderMsg {
     Paint,
     Exit,
 }
-
+#[cfg(target_os = "linux")]
 struct RenderState {
     tx: async_channel::Sender<RenderMsg>,
+}
+
+#[cfg(not(target_os = "linux"))]
+struct RenderState {
+    tx: std::sync::mpsc::SyncSender<RenderMsg>,
 }
 
 impl RenderState {
@@ -270,7 +275,7 @@ fn init_renderer(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>>
 
     surface.configure(&device, &config);
 
-    let (tx, rx) = mpsc::sync_channel::<RenderMsg>(64);
+    let (tx, rx) = std::sync::mpsc::sync_channel::<RenderMsg>(64);
 
     let thread_device = device.clone();
     let thread_queue = queue.clone();
