@@ -68,7 +68,6 @@ fn handle_run(app_handle: &AppHandle, event: RunEvent) {
     }
 }
 
-// Reusable drawing logic
 fn draw_triangle<R: femtovg::Renderer>(canvas: &mut femtovg::Canvas<R>) {
     let w = canvas.width() as f32;
     let h = canvas.height() as f32;
@@ -100,13 +99,11 @@ fn init_renderer(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>>
 
     let window: WebviewWindow = app.get_webview_window("main").unwrap();
 
-    // Get GTK window and its default vbox
     let vbox = window.default_vbox().unwrap();
 
     // The Webview is already packed inside vbox by Tauri.
     // We can extract its children, reparent it into a GTK overlay alongside GLArea.
     let children = vbox.children();
-    // Assuming the first child is the webview container
     let webview_widget = children.first().unwrap().clone();
     vbox.remove(&webview_widget);
 
