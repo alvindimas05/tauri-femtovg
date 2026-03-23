@@ -28,3 +28,4 @@ femtovg = { version = "0.20", features = ["wgpu"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18.2"
 libloading = "0.8.6"
+glib = "0.18"

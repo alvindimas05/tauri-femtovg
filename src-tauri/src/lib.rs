@@ -74,13 +74,13 @@ fn draw_triangle<R: femtovg::Renderer>(canvas: &mut femtovg::Canvas<R>) {
 
     let cx = w / 2.0;
     let top = (h * 0.15, cx);
-    let bl  = (h * 0.85, cx - w * 0.35);
-    let br  = (h * 0.85, cx + w * 0.35);
+    let bl = (h * 0.85, cx - w * 0.35);
+    let br = (h * 0.85, cx + w * 0.35);
 
     let mut path = femtovg::Path::new();
     path.move_to(top.1, top.0);
-    path.line_to(br.1,  br.0);
-    path.line_to(bl.1,  bl.0);
+    path.line_to(br.1, br.0);
+    path.line_to(bl.1, bl.0);
     path.close();
 
     let paint = femtovg::Paint::color(femtovg::Color::rgb(220, 30, 30));
@@ -90,18 +90,17 @@ fn draw_triangle<R: femtovg::Renderer>(canvas: &mut femtovg::Canvas<R>) {
 // Linux / GTK initialization
 #[cfg(target_os = "linux")]
 fn init_renderer(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    use tauri::WindowExtUnix;
     use gtk::prelude::*;
-    use std::rc::Rc;
     use std::cell::RefCell;
+    use std::rc::Rc;
 
     let window: WebviewWindow = app.get_webview_window("main").unwrap();
-    
+
     // Get GTK window and its default vbox
     let gtk_window = window.gtk_window().unwrap();
     let vbox = window.default_vbox().unwrap();
 
-    // The Webview is already packed inside vbox by Tauri. 
+    // The Webview is already packed inside vbox by Tauri.
     // We can extract its children, reparent it into a GTK overlay alongside GLArea.
     let children = vbox.children();
     // Assuming the first child is the webview container
@@ -111,41 +110,54 @@ fn init_renderer(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>>
     let overlay = gtk::Overlay::new();
     let gl_area = gtk::GLArea::new();
     gl_area.set_has_alpha(true);
+    gl_area.set_has_stencil_buffer(true);
     gl_area.set_auto_render(true);
 
-    let canvas_state: Rc<RefCell<Option<femtovg::Canvas<femtovg::renderer::OpenGl>>>> = Rc::new(RefCell::new(None));
+    let canvas_state: Rc<RefCell<Option<femtovg::Canvas<femtovg::renderer::OpenGl>>>> =
+        Rc::new(RefCell::new(None));
     let canvas_state_realize = canvas_state.clone();
     let canvas_state_render = canvas_state.clone();
 
     gl_area.connect_realize(move |gl_area| {
         gl_area.make_current();
-        if gl_area.error().is_some() { return; }
+        if gl_area.error().is_some() {
+            return;
+        }
 
         let renderer = unsafe {
             femtovg::renderer::OpenGl::new_from_function(|s| {
                 let mut ptr = std::ptr::null();
                 let name = std::ffi::CString::new(s).unwrap();
                 if let Ok(lib) = libloading::Library::new("libGL.so.1") {
-                    if let Ok(sym) = lib.get::<unsafe extern "C" fn(*const i8) -> *const std::ffi::c_void>(b"glXGetProcAddress\0") {
+                    if let Ok(sym) = lib
+                        .get::<unsafe extern "C" fn(*const i8) -> *const std::ffi::c_void>(
+                            b"glXGetProcAddress\0",
+                        )
+                    {
                         ptr = sym(name.as_ptr());
                     }
                 }
                 if ptr.is_null() {
                     if let Ok(lib) = libloading::Library::new("libEGL.so.1") {
-                        if let Ok(sym) = lib.get::<unsafe extern "C" fn(*const i8) -> *const std::ffi::c_void>(b"eglGetProcAddress\0") {
+                        if let Ok(sym) =
+                            lib.get::<unsafe extern "C" fn(*const i8) -> *const std::ffi::c_void>(
+                                b"eglGetProcAddress\0",
+                            )
+                        {
                             ptr = sym(name.as_ptr());
                         }
                     }
                 }
                 ptr
             })
-        }.expect("Cannot create femtovg OpenGL renderer");
+        }
+        .expect("Cannot create femtovg OpenGL renderer");
 
         let mut canvas = femtovg::Canvas::new(renderer).expect("Cannot create femtovg canvas");
-        
+
         let alloc = gl_area.allocation();
         canvas.set_size(alloc.width() as u32, alloc.height() as u32, 1.0);
-        
+
         *canvas_state_realize.borrow_mut() = Some(canvas);
     });
 
@@ -177,8 +189,8 @@ fn init_renderer(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>>
     vbox.pack_start(&overlay, true, true, 0);
     overlay.show_all();
 
-    let (tx, rx) = gtk::glib::MainContext::channel(gtk::glib::PRIORITY_DEFAULT);
-    
+    let (tx, rx) = gtk::glib::MainContext::channel(gtk::glib::Priority::DEFAULT);
+
     let gl_area_clone = gl_area.clone();
     rx.attach(None, move |msg| {
         match msg {
@@ -197,16 +209,15 @@ fn init_renderer(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
-// -----------------------------------------------------------------------------
-// NON-LINUX / WGPU INITIALIZATION
-// -----------------------------------------------------------------------------
-
+// wgpu initialization
 #[cfg(not(target_os = "linux"))]
 fn init_renderer(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     use tauri::async_runtime::block_on;
 
     let window: WebviewWindow = app.get_webview_window("main").unwrap();
-    let size = window.inner_size().expect("Failed to get window inner size");
+    let size = window
+        .inner_size()
+        .expect("Failed to get window inner size");
 
     let instance = wgpu::Instance::default();
     let surface = instance.create_surface(window).unwrap();
@@ -231,9 +242,15 @@ fn init_renderer(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>>
     let swapchain_capabilities = surface.get_capabilities(&adapter);
     let swapchain_format = swapchain_capabilities.formats[0];
 
-    let alpha_mode = if swapchain_capabilities.alpha_modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
+    let alpha_mode = if swapchain_capabilities
+        .alpha_modes
+        .contains(&wgpu::CompositeAlphaMode::PreMultiplied)
+    {
         wgpu::CompositeAlphaMode::PreMultiplied
-    } else if swapchain_capabilities.alpha_modes.contains(&wgpu::CompositeAlphaMode::PostMultiplied) {
+    } else if swapchain_capabilities
+        .alpha_modes
+        .contains(&wgpu::CompositeAlphaMode::PostMultiplied)
+    {
         wgpu::CompositeAlphaMode::PostMultiplied
     } else {
         swapchain_capabilities.alpha_modes[0]
@@ -257,7 +274,8 @@ fn init_renderer(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>>
     let thread_device = device.clone();
     let thread_queue = queue.clone();
     std::thread::spawn(move || {
-        let renderer = femtovg::renderer::WGPURenderer::new(thread_device.clone(), thread_queue.clone());
+        let renderer =
+            femtovg::renderer::WGPURenderer::new(thread_device.clone(), thread_queue.clone());
         let mut canvas = femtovg::Canvas::new(renderer).expect("Cannot create femtovg canvas");
         canvas.set_size(size.width, size.height, 1.0);
 
