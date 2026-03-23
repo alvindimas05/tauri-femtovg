@@ -105,6 +105,11 @@ fn init_renderer(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>>
     let webview_widget = children.first().unwrap().clone();
     vbox.remove(&webview_widget);
 
+    // Instead of using `vbox` which messes up `wry`'s `parent().parent()` expectations,
+    // we'll replace the GTK window's root child (`vbox`) with an `Overlay`.
+    let gtk_window = vbox.parent().unwrap().downcast::<gtk::Window>().unwrap();
+    gtk_window.remove(&vbox);
+
     let overlay = gtk::Overlay::new();
     let gl_area = gtk::GLArea::new();
     gl_area.set_has_alpha(true);
@@ -175,16 +180,13 @@ fn init_renderer(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>>
 
     overlay.add(&gl_area);
 
-    // Put webview on top of GLArea
-    let fixed = gtk::Fixed::new();
-    fixed.put(&webview_widget, 0, 0);
-    // Bind webview size to GLArea size
-    gl_area.connect_size_allocate(gtk::glib::clone!(@weak webview_widget => move |_, alloc| {
-        webview_widget.set_size_request(alloc.width(), alloc.height());
-    }));
+    // Put webview on top of GLArea directly into the Overlay
+    // This retains `webview` -> `overlay` -> `gtk_window` hierarchy
+    webview_widget.set_halign(gtk::Align::Fill);
+    webview_widget.set_valign(gtk::Align::Fill);
+    overlay.add_overlay(&webview_widget);
 
-    overlay.add_overlay(&fixed);
-    vbox.pack_start(&overlay, true, true, 0);
+    gtk_window.add(&overlay);
     overlay.show_all();
 
     let (tx, rx) = async_channel::unbounded();
