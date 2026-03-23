@@ -4075,6 +4075,7 @@ dependencies = [
 name = "tauri-femtovg"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
  "femtovg",
  "glib",
  "gtk",

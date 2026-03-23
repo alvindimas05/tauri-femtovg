@@ -1,4 +1,3 @@
-use std::sync::mpsc;
 use tauri::{AppHandle, Manager, RunEvent, WebviewWindow, WindowEvent};
 
 #[tauri::command]
@@ -12,14 +11,14 @@ enum RenderMsg {
     Exit,
 }
 
-#[cfg(not(target_os = "linux"))]
 struct RenderState {
-    tx: mpsc::SyncSender<RenderMsg>,
+    tx: async_channel::Sender<RenderMsg>,
 }
 
-#[cfg(target_os = "linux")]
-struct RenderState {
-    tx: gtk::glib::Sender<RenderMsg>,
+impl RenderState {
+    fn send_msg(&self, msg: RenderMsg) {
+        let _ = self.tx.send(msg);
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -41,7 +40,7 @@ fn handle_run(app_handle: &AppHandle, event: RunEvent) {
             ..
         } => {
             if let Some(state) = app_handle.try_state::<RenderState>() {
-                let _ = state.tx.send(RenderMsg::Resize {
+                state.send_msg(RenderMsg::Resize {
                     width: if size.width > 0 { size.width } else { 1 },
                     height: if size.height > 0 { size.height } else { 1 },
                 });
@@ -50,7 +49,7 @@ fn handle_run(app_handle: &AppHandle, event: RunEvent) {
 
         RunEvent::MainEventsCleared => {
             if let Some(state) = app_handle.try_state::<RenderState>() {
-                let _ = state.tx.send(RenderMsg::Paint);
+                state.send_msg(RenderMsg::Paint);
             }
         }
 
@@ -97,7 +96,6 @@ fn init_renderer(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>>
     let window: WebviewWindow = app.get_webview_window("main").unwrap();
 
     // Get GTK window and its default vbox
-    let gtk_window = window.gtk_window().unwrap();
     let vbox = window.default_vbox().unwrap();
 
     // The Webview is already packed inside vbox by Tauri.
@@ -189,20 +187,21 @@ fn init_renderer(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>>
     vbox.pack_start(&overlay, true, true, 0);
     overlay.show_all();
 
-    let (tx, rx) = gtk::glib::MainContext::channel(gtk::glib::Priority::DEFAULT);
+    let (tx, rx) = async_channel::unbounded();
 
     let gl_area_clone = gl_area.clone();
-    rx.attach(None, move |msg| {
-        match msg {
-            RenderMsg::Resize { .. } => {
-                // Resize handled by GTK layout
+    gtk::glib::MainContext::default().spawn_local(async move {
+        while let Ok(msg) = rx.recv().await {
+            match msg {
+                RenderMsg::Resize { .. } => {
+                    // Resize handled by GTK layout
+                }
+                RenderMsg::Paint => {
+                    gl_area_clone.queue_render();
+                }
+                RenderMsg::Exit => break,
             }
-            RenderMsg::Paint => {
-                gl_area_clone.queue_render();
-            }
-            RenderMsg::Exit => return gtk::glib::ControlFlow::Break,
         }
-        gtk::glib::ControlFlow::Continue
     });
 
     app.manage(RenderState { tx });
