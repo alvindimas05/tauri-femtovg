@@ -8,6 +8,8 @@ fn greet(name: &str) -> String {
 enum RenderMsg {
     Resize { width: u32, height: u32 },
     Paint,
+    Suspend,
+    Resume,
     Exit,
 }
 #[cfg(target_os = "linux")]
@@ -50,6 +52,28 @@ fn handle_run(app_handle: &AppHandle, event: RunEvent) {
                     width: if size.width > 0 { size.width } else { 1 },
                     height: if size.height > 0 { size.height } else { 1 },
                 });
+            }
+        }
+
+        RunEvent::WindowEvent {
+            label: _,
+            event: WindowEvent::Focused(focused),
+            ..
+        } => {
+            if let Some(state) = app_handle.try_state::<RenderState>() {
+                if focused {
+                    state.send_msg(RenderMsg::Resume);
+                    state.send_msg(RenderMsg::Paint);
+                } else {
+                    state.send_msg(RenderMsg::Suspend);
+                }
+            }
+        }
+
+        RunEvent::Resumed => {
+            if let Some(state) = app_handle.try_state::<RenderState>() {
+                state.send_msg(RenderMsg::Resume);
+                state.send_msg(RenderMsg::Paint);
             }
         }
 
@@ -204,6 +228,7 @@ fn init_renderer(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>>
                 RenderMsg::Paint => {
                     gl_area_clone.queue_render();
                 }
+                RenderMsg::Suspend | RenderMsg::Resume => {}
                 RenderMsg::Exit => break,
             }
         }
@@ -215,56 +240,10 @@ fn init_renderer(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>>
 
 // wgpu initialization
 #[cfg(not(target_os = "linux"))]
-fn init_renderer(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    use tauri::async_runtime::block_on;
-
-    let window: WebviewWindow = app.get_webview_window("main").unwrap();
-    
-    // On Android, use JNI to get screen size instead of tao's window size
-    #[cfg(target_os = "android")]
-    let size = {
-        let ctx = ndk_context::android_context();
-        let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }.unwrap();
-        let mut env = vm.attach_current_thread().unwrap();
-        let context = unsafe { jni::objects::JObject::from_raw(ctx.context() as jni::sys::jobject) };
-        let window_service = env.new_string("window").unwrap();
-        let window_manager = env
-            .call_method(
-                &context,
-                "getSystemService",
-                "(Ljava/lang/String;)Ljava/lang/Object;",
-                &[jni::objects::JValue::Object(&window_service)],
-            ).unwrap().l().unwrap();
-
-        let display = env
-            .call_method(&window_manager, "getDefaultDisplay", "()Landroid/view/Display;", &[])
-            .unwrap().l().unwrap();
-
-        let metrics_class = env.find_class("android/util/DisplayMetrics").unwrap();
-        let display_metrics = env.new_object(metrics_class, "()V", &[]).unwrap();
-
-        env.call_method(
-            &display,
-            "getRealMetrics",
-            "(Landroid/util/DisplayMetrics;)V",
-            &[jni::objects::JValue::Object(&display_metrics)],
-        ).unwrap();
-        
-        let width = env.get_field(&display_metrics, "widthPixels", "I").unwrap().i().unwrap() as u32;
-        let height = env.get_field(&display_metrics, "heightPixels", "I").unwrap().i().unwrap() as u32;
-        tauri::PhysicalSize::new(width, height)
-    };
-    
-    #[cfg(not(target_os = "android"))]
-    let size = window
-        .inner_size()
-        .expect("Failed to get window inner size");
-
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-        flags: wgpu::InstanceFlags::empty(),
-        ..Default::default()
-    });
-
+fn create_surface<'a>(
+    instance: &wgpu::Instance,
+    window: &tauri::WebviewWindow,
+) -> Result<wgpu::Surface<'static>, Box<dyn std::error::Error>> {
     #[cfg(target_os = "android")]
     let surface = {
         use jni::objects::{JClass, JObject, JValue};
@@ -380,6 +359,63 @@ fn init_renderer(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>>
     #[cfg(not(target_os = "android"))]
     let surface = instance.create_surface(window.clone()).unwrap();
 
+    let surface: wgpu::Surface<'static> = unsafe { std::mem::transmute(surface) };
+    Ok(surface)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn init_renderer(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    use tauri::async_runtime::block_on;
+
+    let window: WebviewWindow = app.get_webview_window("main").unwrap();
+    
+    // On Android, use JNI to get screen size instead of tao's window size
+    #[cfg(target_os = "android")]
+    let size = {
+        let ctx = ndk_context::android_context();
+        let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }.unwrap();
+        let mut env = vm.attach_current_thread().unwrap();
+        let context = unsafe { jni::objects::JObject::from_raw(ctx.context() as jni::sys::jobject) };
+        let window_service = env.new_string("window").unwrap();
+        let window_manager = env
+            .call_method(
+                &context,
+                "getSystemService",
+                "(Ljava/lang/String;)Ljava/lang/Object;",
+                &[jni::objects::JValue::Object(&window_service)],
+            ).unwrap().l().unwrap();
+
+        let display = env
+            .call_method(&window_manager, "getDefaultDisplay", "()Landroid/view/Display;", &[])
+            .unwrap().l().unwrap();
+
+        let metrics_class = env.find_class("android/util/DisplayMetrics").unwrap();
+        let display_metrics = env.new_object(metrics_class, "()V", &[]).unwrap();
+
+        env.call_method(
+            &display,
+            "getRealMetrics",
+            "(Landroid/util/DisplayMetrics;)V",
+            &[jni::objects::JValue::Object(&display_metrics)],
+        ).unwrap();
+        
+        let width = env.get_field(&display_metrics, "widthPixels", "I").unwrap().i().unwrap() as u32;
+        let height = env.get_field(&display_metrics, "heightPixels", "I").unwrap().i().unwrap() as u32;
+        tauri::PhysicalSize::new(width, height)
+    };
+    
+    #[cfg(not(target_os = "android"))]
+    let size = window
+        .inner_size()
+        .expect("Failed to get window inner size");
+
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        flags: wgpu::InstanceFlags::empty(),
+        ..Default::default()
+    });
+
+    let surface = create_surface(&instance, &window).expect("Failed to create surface");
+
     let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::default(),
         force_fallback_adapter: false,
@@ -431,30 +467,63 @@ fn init_renderer(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>>
 
     let thread_device = device.clone();
     let thread_queue = queue.clone();
+    let thread_instance = instance;
+    let thread_window = window;
+    
     std::thread::spawn(move || {
         let renderer =
             femtovg::renderer::WGPURenderer::new(thread_device.clone(), thread_queue.clone());
         let mut canvas = femtovg::Canvas::new(renderer).expect("Cannot create femtovg canvas");
         canvas.set_size(size.width, size.height, 1.0);
 
+        let mut surface_opt = Some(surface);
+
         for msg in rx {
             match msg {
                 RenderMsg::Resize { width, height } => {
                     config.width = width;
                     config.height = height;
-                    surface.configure(&thread_device, &config);
+                    if let Some(surface) = &surface_opt {
+                        surface.configure(&thread_device, &config);
+                    }
                     canvas.set_size(width, height, 1.0);
                 }
 
                 RenderMsg::Paint => {
-                    let frame = match surface.get_current_texture() {
-                        Ok(f) => f,
-                        Err(_) => continue,
-                    };
-                    draw_triangle(&mut canvas);
-                    let cmd_buffer = canvas.flush_to_surface(&frame.texture);
-                    thread_queue.submit(std::iter::once(cmd_buffer));
-                    frame.present();
+                    if let Some(surface) = &surface_opt {
+                        let frame = match surface.get_current_texture() {
+                            Ok(f) => f,
+                            Err(_) => continue,
+                        };
+                        draw_triangle(&mut canvas);
+                        let cmd_buffer = canvas.flush_to_surface(&frame.texture);
+                        thread_queue.submit(std::iter::once(cmd_buffer));
+                        frame.present();
+                    }
+                }
+
+                RenderMsg::Suspend => {
+                    #[cfg(target_os = "android")]{
+                        surface_opt = None;
+                        println!("Render loop: WGPU Surface suspended/dropped");
+                    }
+                }
+
+                RenderMsg::Resume => {
+                    #[cfg(target_os = "android")]
+                    if surface_opt.is_none() {
+                        println!("Render loop: Resuming WGPU surface...");
+                        match create_surface(&thread_instance, &thread_window) {
+                            Ok(new_surface) => {
+                                new_surface.configure(&thread_device, &config);
+                                surface_opt = Some(new_surface);
+                                println!("Render loop: WGPU Surface recreated");
+                            }
+                            Err(e) => {
+                                println!("Render loop: Failed to recreate surface: {}", e);
+                            }
+                        }
+                    }
                 }
 
                 RenderMsg::Exit => break,
